@@ -3,12 +3,19 @@ import asyncio
 import datetime
 import traceback
 import objectpath
+import asyncio
+import datetime
+import traceback
 
 # Step 0 - Init
 BUNDLEID_BRAVEBROWSER = 'com.brave.Browser'
+BUNDLEID_CHROMEBROWSER = 'com.google.Chrome'
 pollGoogleMeetTabInBraveBrowser = None
+
+# Step 0.2 - Init for debug
 DEBUG = False
 callStartedOn = None
+lastTimeCallLogWasPrinted = None
 
 # Step 1 - Create a run loop and layer1MessageCenter instance
 loop = asyncio.get_event_loop()
@@ -39,6 +46,23 @@ def printInExtensionLog(msg):
     layer1.log (' - [{}] {}'.format(now, msg))
     # layer1.log (' =============================== \n')
 
+def formatTimedelta(td):
+    total_seconds = int(td.total_seconds())
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    # round off the values
+    hours = round(hours)
+    minutes = round(minutes)
+    seconds = round(seconds)
+
+    if hours > 0:
+        return f"{hours} hour(s) and {minutes} minute(s)"
+    elif minutes > 0:
+        return f"{minutes} minute(s) and {seconds} second(s)"
+    else:
+        return f"{seconds} second(s)"
+
 #######################################################
 # SUMMARIZATION FUNCTIONS
 #######################################################
@@ -53,12 +77,13 @@ async def handleCallDidEnd(msg):
         # Step 0.2 - Log
         startTime = datetime.datetime.fromtimestamp(msg['startDate'])
         endTime = datetime.datetime.fromtimestamp(msg['endDate'])
-        duration = (endTime - startTime).total_seconds() / 60
-        printInExtensionLog(f'Call ended for id: {msg["callID"]} and it ran for {duration} minutes')
+        durationStr = formatTimedelta(endTime - startTime)
+        layer1.log(durationStr)
+        printInExtensionLog(f'Call ended in {msg["appName"]} (callID= {msg["callID"]}) and it ran for {durationStr}')
         
         # Step 1 - Send message to get summary
-        printInExtensionLog(' - Sending summary request')
-        script_msg = {
+        printInExtensionLog('Sending summary request')
+        scriptMsg = {
             "event": "layerScript.run",
             "data": {
                 "scriptID": "0FFC00D4-4535-405F-9C6F-B10936E595EE",
@@ -66,20 +91,27 @@ async def handleCallDidEnd(msg):
                 # "scriptInput": "1706636386"
             }
         }
-        summary_msg = await layer1MessageCenter.send_message(script_msg)
-        summary = summary_msg['summary']
-        layer1.log("summary:" + str(summary))
+        summaryMsg = await layer1MessageCenter.send_message(scriptMsg)
+        summaryObjStr = summaryMsg['summary']
+        summaryObjList = eval(summaryObjStr)
+        for summaryObj in summaryObjList:
+            title = summaryObj['title']
+            summaryStr = summaryObj['summary']
+            printInExtensionLog(f'[Summary][{title}] : {summaryStr}')
+
+        # Step 2 - Save summary
         save_msg = {
             "event": "edb.runEdgeQL",
             "data": {
                 "query": "update Call filter .callID = <int64>$callID set { summary := <str>$summary };",
                 "variables": {
                     "callID": msg['callID'],
-                    "summary": summary
+                    "summary": summaryObjStr
                 }
             }
         }
         summary_resp = await layer1MessageCenter.send_message(save_msg)
+        printInExtensionLog('summary_resp: {}'.format(summary_resp))
     
     except:
         traceback.print_exc()
@@ -174,18 +206,22 @@ async def pollForGoogleMeetTabInBraveBrowser(pid):
 
         try:
             googleMeetCallFoundObj = await findGoogleMeetCallTabInBraveBrowser(pid)
-            layer1.log ('\n - Google Meet Call Found: ', googleMeetCallFoundObj)
+            # layer1.log ('\n - Google Meet Call Found: ', googleMeetCallFoundObj)
             if googleMeetCallFoundObj is not None:
                 if onGoogleMeetCall == False:
                     printInExtensionLog('Google Meet call has now started')
                     onGoogleMeetCall = True
                     global callStartedOn
                     callStartedOn = datetime.datetime.now()
+                    global lastTimeCallLogWasPrinted
+                    lastTimeCallLogWasPrinted = callStartedOn
                     await startRecordingGoogleMeet(pid)
                 else:
-                    timePassed = datetime.datetime.now() - callStartedOn
-                    if timePassed.seconds > 10:
-                        printInExtensionLog('Time Passed for {}: {} sec'.format(googleMeetCallFoundObj['description'], timePassed.total_seconds()))
+                    lastTimeCallLogWasPrintedDeltaObj = datetime.datetime.now() - lastTimeCallLogWasPrinted
+                    if lastTimeCallLogWasPrintedDeltaObj.total_seconds() > 10:
+                        timeDeltaObjForCall = datetime.datetime.now() - callStartedOn
+                        printInExtensionLog('Time Passed for {}: {} '.format(googleMeetCallFoundObj['description'], formatTimedelta(timeDeltaObjForCall)))
+                        lastTimeCallLogWasPrinted = datetime.datetime.now()
             else:
                 if onGoogleMeetCall == True:
                     printInExtensionLog('Google Meet call is now stopped')
@@ -204,7 +240,6 @@ async def pollForGoogleMeetTabInBraveBrowser(pid):
 #######################################################
 
 async def callHandler(channel, event, msg):
-    layer1.log(' - [callHandler()] Call event: ', event, msg)
     if event == 'callRecordingStopped': #'callDidEnd'
         await handleCallDidEnd(msg)
 
@@ -227,9 +262,9 @@ async def systemHandler(channel, event, msg):
 async def checkBraveBrowserRunning():
 
     # Step 0 - Init
-    printInExtensionLog("Checking for existing Brave Browser instance ... Trial 2 ")
+    printInExtensionLog("Checking for existing Brave Browser instance ... Trial 3 ")
     def isBraveBrowser(app):
-        return 'bundleID' in app and app['bundleID'] == BUNDLEID_BRAVEBROWSER
+        return 'bundleID' in app and app['bundleID'] in [BUNDLEID_BRAVEBROWSER]
 
     # Step 1 - Send message to get running apps
     msg = {"event": "system.getRunningApps"}
