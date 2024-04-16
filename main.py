@@ -8,12 +8,13 @@ import datetime
 import traceback
 
 # Step 0 - Init
-BUNDLEID_BRAVEBROWSER = 'com.brave.Browser'
+BUNDLEID_BRAVEBROWSER  = 'com.brave.Browser'
 BUNDLEID_CHROMEBROWSER = 'com.google.Chrome'
+BUNDLEID_SAFARIBROWSER = 'com.apple.Safari'
 pollGoogleMeetTabInBraveBrowser = None
 
 # Step 0.2 - Init for debug
-DEBUG = False
+DEBUG         = True
 callStartedOn = None
 lastTimeCallLogWasPrinted = None
 
@@ -64,6 +65,43 @@ def formatTimedelta(td):
         return f"{seconds} second(s)"
 
 #######################################################
+# TEST
+#######################################################
+
+async def writeCallTest():
+
+    try:
+        
+        # Step 1 - Save summary
+        # save_msg = {
+        #     "event": "edb.runEdgeQL",
+        #     "data": {
+        #         "query": "insert Call { appName := 'Google Chrome', callID := 12345, startDate := <datetime>$start };"
+        #         , "variables": {
+        #             "start": "2024-04-15T20:07:22.856+00:00"
+        #         }
+        #     }
+        # }
+
+        save_msg = {
+            "event": "edb.runEdgeQL",
+            "data": {
+                "query": "update Call filter .callID = <int64>$callID set { summary := <str>$summary };",
+                "variables": {
+                    "callID": 12345,
+                    "summary": "Trial 1"
+                }
+            }
+        }
+
+        summary_resp = await layer1MessageCenter.send_message(save_msg)
+        layer1.log('summary_resp: {}'.format(summary_resp))
+
+    except:
+        traceback.print_exc()
+        layer1.log(' - Error in writeCallTest()')
+
+#######################################################
 # SUMMARIZATION FUNCTIONS
 #######################################################
     
@@ -78,7 +116,6 @@ async def handleCallDidEnd(msg):
         startTime = datetime.datetime.fromtimestamp(msg['startDate'])
         endTime = datetime.datetime.fromtimestamp(msg['endDate'])
         durationStr = formatTimedelta(endTime - startTime)
-        layer1.log(durationStr)
         printInExtensionLog(f'Call ended in {msg["appName"]} (callID= {msg["callID"]}) and it ran for {durationStr}')
         
         # Step 1 - Send message to get summary
@@ -88,16 +125,21 @@ async def handleCallDidEnd(msg):
             "data": {
                 "scriptID": "0FFC00D4-4535-405F-9C6F-B10936E595EE",
                 "scriptInput": str(msg['callID'])
-                # "scriptInput": "1706636386"
             }
         }
-        summaryMsg = await layer1MessageCenter.send_message(scriptMsg)
-        summaryObjStr = summaryMsg['summary']
-        summaryObjList = eval(summaryObjStr)
-        for summaryObj in summaryObjList:
-            title = summaryObj['title']
-            summaryStr = summaryObj['summary']
-            printInExtensionLog(f'[Summary][{title}] : {summaryStr}')
+
+        try:
+            summaryMsg = await layer1MessageCenter.send_message(scriptMsg)
+            summaryObjStr = summaryMsg['summary']
+            summaryObjList = eval(summaryObjStr)
+            for summaryObj in summaryObjList:
+                title = summaryObj['title']
+                summaryStr = summaryObj['summary']
+                printInExtensionLog(f'[Summary][{title}] : {summaryStr}')
+        except:
+            traceback.print_exc()
+            layer1.log(' - Error in handleCallDidEnd()')
+            summaryStr = 'Error in summarization'
 
         # Step 2 - Save summary
         save_msg = {
@@ -112,6 +154,8 @@ async def handleCallDidEnd(msg):
         }
         summary_resp = await layer1MessageCenter.send_message(save_msg)
         printInExtensionLog('summary_resp: {}'.format(summary_resp))
+        
+        
     
     except:
         traceback.print_exc()
@@ -182,7 +226,9 @@ async def findGoogleMeetCallTabInBraveBrowser(pid):
     resp = await layer1MessageCenter.send_message(msg)
 
     # Step 3 - Process response
-    results = find_in_dict(resp, 'role', 'AXRadioButton')
+    results = find_in_dict(resp, 'role', 'AXRadioButton') # OR find_in_dict(resp, 'subrole', 'AXTabButton')
+    if DEBUG:
+        layer1.log (' ================================------------------>>>>>>>')
     for result in results:
         if DEBUG:
             layer1.log (' --------------------->>>>>>>')
@@ -195,6 +241,11 @@ async def findGoogleMeetCallTabInBraveBrowser(pid):
             if DEBUG:
                 layer1.log (' - Google Meet Tab is open and recording')
             return result
+        if 'Meet' in result['description'] and 'shared' in result['description']:
+            if DEBUG:
+                layer1.log (' - Google Meet Tab is open and recording')
+            return result
+    return None
 
 async def pollForGoogleMeetTabInBraveBrowser(pid):
     
@@ -240,12 +291,14 @@ async def pollForGoogleMeetTabInBraveBrowser(pid):
 #######################################################
 
 async def callHandler(channel, event, msg):
+    layer1.log(' - [callHandler] event: ', event, ' msg: ', msg)
     if event == 'callRecordingStopped': #'callDidEnd'
         await handleCallDidEnd(msg)
 
 # Handle for incoming events on the 'system' channel
 ## (If extension is already loaded), then check if Brave Browser was launched/terminated
 async def systemHandler(channel, event, msg):
+
     if event == 'applicationDidLaunch':
         layer1.log (' - App launched: ', msg['bundleID'], msg['appName'], msg['pid'])
         if 'bundleId' in msg and msg['bundleID'] == BUNDLEID_BRAVEBROWSER:
@@ -259,19 +312,19 @@ async def systemHandler(channel, event, msg):
             pollGoogleMeetTabInBraveBrowser.cancel()
 
 # Check for an open instance of Brave Browser (when this extension is loaded)
-async def checkBraveBrowserRunning():
+async def checkBraveBrowserRunning(browserBundleIds):
 
     # Step 0 - Init
     printInExtensionLog("Checking for existing Brave Browser instance ... Trial 3 ")
     def isBraveBrowser(app):
-        return 'bundleID' in app and app['bundleID'] in [BUNDLEID_BRAVEBROWSER]
+        return 'bundleID' in app and app['bundleID'] in browserBundleIds
 
     # Step 1 - Send message to get running apps
     msg = {"event": "system.getRunningApps"}
     resp = await layer1MessageCenter.send_message(msg)
 
     # Step 2 - Process response
-    apps = resp['runningApps']
+    apps      = resp['runningApps']
     braveProc = next(filter(lambda app: isBraveBrowser(app), apps), None)
     if braveProc:
         printInExtensionLog("Brave Browser is currently running")
@@ -285,7 +338,9 @@ async def checkBraveBrowserRunning():
 #######################################################
 
 # Step 3.0 - Create tasks
-loop.create_task(checkBraveBrowserRunning())
+loop.create_task(checkBraveBrowserRunning(browserBundleIds=[BUNDLEID_BRAVEBROWSER]))
+
+# loop.create_task(writeCallTest())
 
 # Step 3.1 - Subscribe to incoming events on the 'recorder' channel
 layer1MessageCenter.subscribe('system', systemHandler)
